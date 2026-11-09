@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FA 하드웨어 공급 시뮬레이터</title>
+<style>
+:root{--bg:#f3f1ec;--panel:#fff;--ink:#1d1f23;--mute:#6b6f76;--line:#d9d5cc;--acc:#e8590c;--ok:#e3f1e6;--bad:#c62828;--chart:#1a5fb4}
+@media (prefers-color-scheme:dark){:root{--bg:#16181b;--panel:#202328;--ink:#e8e6e1;--mute:#9a9ea5;--line:#33373d;--acc:#ff8a3d;--ok:#1f3a27;--bad:#ff7a70;--chart:#6ea8ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif;padding:14px;max-width:1240px;margin-inline:auto}
+h1{font-size:20px;margin:0 0 2px}h1 span{color:var(--acc)}
+.sub{color:var(--mute);font-size:12px;margin-bottom:12px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:10px}
+.stat{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--acc);padding:6px 10px}
+.stat b{display:block;font:700 17px ui-monospace,Menlo,Consolas,monospace}.stat small{color:var(--mute)}
+.grid{display:grid;grid-template-columns:1fr 1.25fr;gap:10px;margin-bottom:10px}
+@media(max-width:860px){.grid{grid-template-columns:1fr}}
+.box{background:var(--panel);border:1px solid var(--line);padding:8px;min-width:0}
+.box h2{font-size:12px;letter-spacing:.06em;color:var(--mute);margin:0 0 6px;text-transform:uppercase}
+.sc{overflow:auto;max-height:230px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:4px 6px;text-align:center;border-bottom:1px solid var(--line);white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);color:var(--mute);font-weight:600}
+tr.sel td{outline:2px solid var(--acc);outline-offset:-2px}
+tr.can td{background:var(--ok)}tr.late td{color:var(--bad)}
+#orders tbody tr{cursor:pointer}
+.ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}
+button,select,input[type=number]{font:inherit;padding:5px 10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:3px}
+button{cursor:pointer}button:hover{border-color:var(--acc)}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700}
+input[type=number]{width:70px}.sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+label{display:flex;gap:4px;align-items:center}
+#log{height:150px;overflow:auto;font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
+svg{width:100%;height:150px;display:block}
+dialog{border:2px solid var(--acc);background:var(--panel);color:var(--ink);max-width:min(92vw,640px)}
+dialog::backdrop{background:#0008}
+.kv{display:grid;grid-template-columns:auto auto;gap:2px 18px;font-family:ui-monospace,Menlo,monospace}
+.kv span:nth-child(even){text-align:right}
+</style>
+</head>
+<body>
+<h1>FA <span>하드웨어 공급</span> 시뮬레이터</h1>
+<div class="sub">주문 출하 · 재고 발주 · 90일 운영 후 순자산(현금+재고자산)으로 평가합니다.</div>
+
+<div class="stats" id="stats"></div>
+
+<div class="grid">
+  <div class="box"><h2>재고 현황</h2><div class="sc"><table id="inv"></table></div></div>
+  <div class="box"><h2>고객 주문 (더블클릭 = 출하)</h2><div class="sc"><table id="orders"></table></div></div>
+</div>
+<div class="grid">
+  <div class="box"><h2>발주 현황 (입고 대기)</h2><div class="sc" style="max-height:150px"><table id="po"></table></div></div>
+  <div class="box"><h2>순자산 추이</h2><svg id="chart" viewBox="0 0 600 150" preserveAspectRatio="none"></svg></div>
+</div>
+
+<div class="ctl">
+  <select id="part"></select>
+  <input type="number" id="qty" value="20" min="1" max="500">
+  <button id="buy">발주</button>
+  <button id="shipSel">선택 주문 출하</button>
+  <button id="shipAll">출하 가능 전체 출하</button>
+  <span class="sep"></span>
+  <button class="p" id="next">다음 날 ▶</button>
+  <button id="d7">7일 ▶▶</button>
+  <button id="play">자동 재생</button>
+  <span class="sep"></span>
+  <label><input type="checkbox" id="aShip">자동 출하</label>
+  <label><input type="checkbox" id="aRe">자동 재고보충</label>
+  <span class="sep"></span>
+  <button id="cmp">정책 비교</button>
+  <button id="reset">새로 시작</button>
+</div>
+
+<div class="box"><h2>이벤트 로그</h2><div id="log"></div></div>
+<dialog id="dlg"><div id="dlgBody"></div><p style="text-align:right;margin:12px 0 0"><button class="p" onclick="dlg.close()">닫기</button></p></dialog>
+
+<script>
+// ===== RNG (seedable) =====
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+class RNG{
+  constructor(seed){this.f=mulberry32(seed==null?(Math.random()*2**32)>>>0:seed)}
+  random(){return this.f()}
+  randint(a,b){return a+Math.floor(this.f()*(b-a+1))}
+  choice(arr){return arr[Math.floor(this.f()*arr.length)]}
+  choices(arr,w){let s=w.reduce((x,y)=>x+y,0),r=this.f()*s;for(let i=0;i<arr.length;i++){r-=w[i];if(r<0)return arr[i]}return arr[arr.length-1]}
+  gauss(m,sd){let u=1-this.f(),v=this.f();return m+sd*Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v)}
+}
+
+// ===== 엔진 =====
+const CUSTOMERS=["한빛전자","대성정밀","미래오토메이션","동양기계","코리아패키징","유니온테크","세진산업","나래반도체","태광물류","서진디스플레이"];
+const defaultParts=()=>[
+ ["SEN-001","근접 센서 M12","센서",12000,18000,40,3,20,60,[5,20],5],
+ ["CBL-200","센서 케이블 2m","배선",3000,5500,80,2,40,100,[10,40],4],
+ ["PNE-021","공압 실린더 Ø32","공압",38000,55000,25,4,12,30,[3,12],4],
+ ["VAC-050","진공 그리퍼","공압",22000,34000,20,4,10,25,[2,10],3],
+ ["LMG-300","리니어 가이드 300mm","리니어",68000,95000,10,6,5,10,[1,6],3],
+ ["PLC-100","PLC CPU 모듈","제어",470000,650000,8,5,4,8,[1,3],2],
+ ["MOT-010","서보모터 400W","모터",310000,420000,6,7,4,8,[1,4],2]
+].map(a=>({code:a[0],name:a[1],cat:a[2],cost:a[3],price:a[4],stock:a[5],lead:a[6],rp:a[7],oq:a[8],dq:a[9],pop:a[10]}));
+
+class Sim{
+  static MAX_DAYS=90; static FIXED=120000; static HOLD=0.0005; static LATE=0.10; static GRACE=5; static CANCEL=0.20;
+  constructor(seed,cash=20000000){
+    this.rng=new RNG(seed);this.day=0;this.cash=cash;this.rep=60;
+    this.parts=Object.fromEntries(defaultParts().map(p=>[p.code,p]));
+    this.orders=[];this.pos=[];this.log=[];this.oid=0;this.poid=0;
+    this.surge={};this.surgeRate=1.25;
+    this.revenue=0;this.penalties=0;this.ontime=0;this.late=0;this.cancelled=0;
+    this.history=[this.netWorth()];this.autoShip=false;this.autoRe=false;this.over=false;
+  }
+  say(m){this.log.push(`[D${String(this.day).padStart(2,"0")}] ${m}`)}
+  unitCost(c){const p=this.parts[c];return (this.surge[c]??0)>=this.day&&this.surge[c]!==undefined?Math.round(p.cost*this.surgeRate):p.cost}
+  onOrder(c){return this.pos.filter(x=>x.code==c).reduce((s,x)=>s+x.qty,0)}
+  invValue(){return Object.values(this.parts).reduce((s,p)=>s+p.stock*p.cost,0)}
+  netWorth(){return this.cash+this.invValue()}
+  open(){return this.orders.filter(o=>o.status==="대기")}
+  canShip(o){return Object.entries(o.lines).every(([c,q])=>this.parts[c].stock>=q)}
+  service(){const t=this.ontime+this.late+this.cancelled;return t?100*this.ontime/t:100}
+  purchase(code,qty){
+    if(!(qty>0))return[false,"수량은 1 이상이어야 합니다."];
+    const unit=this.unitCost(code),total=unit*qty,p=this.parts[code];
+    if(total>this.cash)return[false,`현금 부족 (필요 ${fmt(total)}원 / 보유 ${fmt(this.cash)}원)`];
+    this.cash-=total;this.pos.push({id:++this.poid,code,qty,unit,arrive:this.day+p.lead});
+    this.say(`발주 ${p.name} x${qty} @ ${fmt(unit)}원${unit!==p.cost?" (가격 급등 중)":""} → D${this.day+p.lead} 입고 예정`);
+    return[true,"발주 완료"];
+  }
+  ship(id){
+    const o=this.orders.find(x=>x.id===id);
+    if(!o||o.status!=="대기")return[false,"출하할 수 없는 주문입니다."];
+    if(!this.canShip(o))return[false,"재고가 부족합니다."];
+    for(const[c,q]of Object.entries(o.lines))this.parts[c].stock-=q;
+    this.cash+=o.amount;this.revenue+=o.amount;
+    if(this.day<=o.due){o.status="출하(정시)";this.ontime++;this.rep=Math.min(100,this.rep+1);
+      this.say(`주문 #${o.id} ${o.customer} 정시 출하 +${fmt(o.amount)}원`);}
+    else{o.status="출하(지연)";this.late++;const pen=Math.round(o.amount*Sim.LATE);
+      this.cash-=pen;this.penalties+=pen;this.rep=Math.max(0,this.rep-2);
+      this.say(`주문 #${o.id} ${o.customer} 지연 출하 +${fmt(o.amount)}원 (패널티 -${fmt(pen)}원)`);}
+    return[true,"출하 완료"];
+  }
+  shipAll(){let n=0;for(const o of [...this.open()].sort((a,b)=>a.due-b.due))if(this.canShip(o))n+=this.ship(o.id)[0]?1:0;return n}
+  reorderAll(){let n=0;for(const[c,p]of Object.entries(this.parts))if(p.stock+this.onOrder(c)<=p.rp)n+=this.purchase(c,p.oq)[0]?1:0;return n}
+  step(){
+    if(this.over)return;
+    this.day++;this.receive();const m=this.event();this.newOrders(m);
+    if(this.autoShip)this.shipAll();
+    if(this.autoRe)this.reorderAll();
+    this.expire();this.dailyCosts();this.history.push(this.netWorth());
+    if(this.day>=Sim.MAX_DAYS){this.over=true;this.say("시뮬레이션 종료 — 최종 평가를 확인하세요.")}
+    else if(this.cash<-2000000){this.over=true;this.say("현금 잔고 한도 초과 — 부도 처리되었습니다.")}
+  }
+  receive(){
+    for(const po of this.pos.filter(x=>x.arrive<=this.day)){this.parts[po.code].stock+=po.qty;this.say(`입고 ${this.parts[po.code].name} x${po.qty}`)}
+    this.pos=this.pos.filter(x=>x.arrive>this.day);
+  }
+  event(){
+    let mult=1;
+    if(this.rng.random()<0.12){
+      const kind=this.rng.choice(["surge","delay","spike"]),code=this.rng.choice(Object.keys(this.parts)),name=this.parts[code].name;
+      if(kind==="surge"){this.surge[code]=this.day+5;this.say(`⚠ 이벤트: ${name} 매입가 25% 급등 (5일간)`)}
+      else if(kind==="delay"){const hit=this.pos.filter(x=>x.code===code);hit.forEach(x=>x.arrive+=3);if(hit.length)this.say(`⚠ 이벤트: 공급업체 사정으로 ${name} 입고 3일 지연`)}
+      else{mult=2;this.say("⚠ 이벤트: 수요 급증! 오늘 주문이 크게 늘었습니다.")}
+    }
+    return mult;
+  }
+  newOrders(mult){
+    const mean=(1.5+this.rep/40)*mult,n=Math.max(0,Math.round(this.rng.gauss(mean,1))),codes=Object.keys(this.parts),w=codes.map(c=>this.parts[c].pop);
+    for(let i=0;i<n;i++){
+      const lines={};
+      for(let k=this.rng.randint(1,3);k>0;k--){const c=this.rng.choices(codes,w),[lo,hi]=this.parts[c].dq;lines[c]=(lines[c]||0)+this.rng.randint(lo,hi)}
+      const amount=Object.entries(lines).reduce((s,[c,q])=>s+this.parts[c].price*q,0);
+      const o={id:++this.oid,customer:this.rng.choice(CUSTOMERS),lines,created:this.day,due:this.day+this.rng.randint(3,7),amount,status:"대기"};
+      this.orders.push(o);this.say(`신규 주문 #${o.id} ${o.customer} ${fmt(amount)}원 (납기 D${o.due})`);
+    }
+  }
+  expire(){
+    for(const o of this.open())if(this.day>o.due+Sim.GRACE){
+      o.status="취소";this.cancelled++;const pen=Math.round(o.amount*Sim.CANCEL);
+      this.cash-=pen;this.penalties+=pen;this.rep=Math.max(0,this.rep-5);
+      this.say(`✖ 주문 #${o.id} ${o.customer} 취소 (패널티 -${fmt(pen)}원, 평판 하락)`);
+    }
+  }
+  dailyCosts(){this.cash-=Sim.FIXED+Math.round(this.invValue()*Sim.HOLD)}
+  summary(){return{"일차":this.day,"현금":Math.round(this.cash),"재고자산":this.invValue(),"순자산":Math.round(this.netWorth()),"매출":this.revenue,"패널티":this.penalties,"정시출하":this.ontime,"지연출하":this.late,"취소":this.cancelled,"정시납기율(%)":+this.service().toFixed(1),"평판":+this.rep.toFixed(1)}}
+  grade(){const n=this.netWorth();return n>=7e7?"S  (탁월한 공급망 운영)":n>=5e7?"A  (우수)":n>=3.5e7?"B  (양호)":n>=2e7?"C  (개선 필요)":"D  (재고·납기 관리 재점검)"}
+}
+
+// ===== UI =====
+const $=id=>document.getElementById(id),fmt=n=>Math.round(n).toLocaleString("ko-KR");
+let sim=new Sim(),sel=null,timer=null,logIdx=0;
+$("part").innerHTML=Object.values(sim.parts).map(p=>`<option value="${p.code}">${p.code}  ${p.name}</option>`).join("");
+
+function refresh(){
+  const s=sim;
+  $("stats").innerHTML=[["일차",`${s.day} / ${Sim.MAX_DAYS}`],["현금",fmt(s.cash)+"원"],["재고자산",fmt(s.invValue())+"원"],["순자산",fmt(s.netWorth())+"원"],["평판",s.rep.toFixed(0)],["정시납기율",s.service().toFixed(0)+"%"]]
+    .map(([t,v])=>`<div class="stat"><small>${t}</small><b>${v}</b></div>`).join("");
+  $("inv").innerHTML="<thead><tr><th>코드</th><th>품명</th><th>재고</th><th>입고예정</th><th>재주문점</th><th>매입가</th><th>판매가</th></tr></thead><tbody>"+
+    Object.values(s.parts).map(p=>`<tr><td>${p.code}</td><td>${p.name}</td><td>${p.stock}</td><td>${s.onOrder(p.code)}</td><td>${p.rp}</td><td>${fmt(s.unitCost(p.code))}</td><td>${fmt(p.price)}</td></tr>`).join("")+"</tbody>";
+  const shown=[...s.orders.filter(o=>o.status==="대기"),...s.orders.filter(o=>o.status!=="대기").slice(-8)];
+  if(sel!==null&&!shown.some(o=>o.id===sel))sel=null;
+  $("orders").innerHTML="<thead><tr><th>#</th><th>고객</th><th>품목</th><th>납기</th><th>금액</th><th>상태</th></tr></thead><tbody>"+
+    shown.map(o=>{let c="";if(o.status==="대기")c=s.day>o.due?"late":s.canShip(o)?"can":"";if(o.id===sel)c+=" sel";
+      return`<tr data-id="${o.id}" class="${c}"><td>${o.id}</td><td>${o.customer}</td><td>${Object.entries(o.lines).map(([k,q])=>`${k}×${q}`).join(", ")}</td><td>D${o.due}</td><td>${fmt(o.amount)}</td><td>${o.status}</td></tr>`}).join("")+"</tbody>";
+  $("po").innerHTML="<thead><tr><th>#</th><th>품명</th><th>수량</th><th>단가</th><th>입고일</th></tr></thead><tbody>"+
+    s.pos.map(p=>`<tr><td>${p.id}</td><td>${s.parts[p.code].name}</td><td>${p.qty}</td><td>${fmt(p.unit)}</td><td>D${p.arrive}</td></tr>`).join("")+"</tbody>";
+  chart();
+  const lg=$("log");lg.textContent+=s.log.slice(logIdx).map(l=>l+"\n").join("");logIdx=s.log.length;lg.scrollTop=lg.scrollHeight;
+}
+function chart(){
+  const d=sim.history,W=600,H=150,P=24,svg=$("chart");
+  if(d.length<2){svg.innerHTML=`<text x="300" y="75" text-anchor="middle" fill="#888" font-size="13">날짜를 진행하면 그래프가 표시됩니다</text>`;return}
+  const lo=Math.min(...d),hi=Math.max(...d),sp=(hi-lo)||1;
+  const pts=d.map((v,i)=>`${(P+(W-2*P)*i/Sim.MAX_DAYS).toFixed(1)},${(H-P/2-(H-P)*(v-lo)/sp).toFixed(1)}`).join(" ");
+  svg.innerHTML=`<polyline points="${pts}" fill="none" stroke="var(--chart)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  <text x="4" y="10" font-size="10" fill="var(--mute)">${(hi/1e6).toFixed(1)}M</text><text x="4" y="${H-3}" font-size="10" fill="var(--mute)">${(lo/1e6).toFixed(1)}M</text>`;
+}
+function stopPlay(){clearInterval(timer);timer=null;$("play").textContent="자동 재생"}
+function checkEnd(){
+  if(!sim.over)return;stopPlay();
+  const s=sim.summary();
+  $("dlgBody").innerHTML=`<h2 style="margin-top:0">시뮬레이션 종료</h2><div class="kv">${Object.entries(s).map(([k,v])=>`<span>${k}</span><span>${typeof v==="number"?v.toLocaleString("ko-KR"):v}</span>`).join("")}</div><p><b>최종 등급: ${sim.grade()}</b></p>`;
+  $("dlg").showModal();
+}
+function advance(n){for(let i=0;i<n&&!sim.over;i++)sim.step();refresh();checkEnd()}
+const syncAuto=()=>{sim.autoShip=$("aShip").checked;sim.autoRe=$("aRe").checked};
+
+$("orders").addEventListener("click",e=>{const tr=e.target.closest("tr[data-id]");if(!tr)return;sel=+tr.dataset.id;refresh()});
+$("orders").addEventListener("dblclick",e=>{if(e.target.closest("tr[data-id]"))shipSel()});
+function shipSel(){
+  if(sel===null)return alert("출하할 주문을 선택하세요.");
+  const[ok,msg]=sim.ship(sel);if(!ok)alert(msg);refresh();
+}
+$("buy").onclick=()=>{const q=parseInt($("qty").value);if(isNaN(q))return alert("수량을 숫자로 입력하세요.");const[ok,m]=sim.purchase($("part").value,q);if(!ok)alert(m);refresh()};
+$("shipSel").onclick=shipSel;
+$("shipAll").onclick=()=>{if(sim.shipAll()===0)alert("출하 가능한 주문이 없습니다.");refresh()};
+$("next").onclick=()=>advance(1);
+$("d7").onclick=()=>advance(7);
+$("play").onclick=()=>{if(timer)return stopPlay();$("play").textContent="정지";timer=setInterval(()=>{advance(1)},500)};
+$("aShip").onchange=$("aRe").onchange=syncAuto;
+$("reset").onclick=()=>{stopPlay();sim=new Sim();syncAuto();logIdx=0;sel=null;$("log").textContent="";refresh()};
+$("cmp").onclick=()=>{
+  const pol=[["수동(아무것도 안 함)",0,0],["자동 출하만",1,0],["자동 출하 + 자동 재고보충",1,1]];
+  const res=pol.map(([n,a,b])=>{const s=new Sim(42);s.autoShip=!!a;s.autoRe=!!b;while(s.day<Sim.MAX_DAYS&&!s.over)s.step();return[n,s]});
+  const keys=["순자산","현금","재고자산","매출","패널티","정시출하","지연출하","취소","정시납기율(%)","평판"];
+  const best=res.reduce((a,b)=>b[1].netWorth()>a[1].netWorth()?b:a);
+  $("dlgBody").innerHTML=`<h2 style="margin-top:0">운영 정책 비교 (${Sim.MAX_DAYS}일, seed=42)</h2><table><thead><tr><th>항목</th>${res.map(r=>`<th>${r[0]}</th>`).join("")}</tr></thead><tbody>${keys.map(k=>`<tr><td>${k}</td>${res.map(r=>`<td>${r[1].summary()[k].toLocaleString("ko-KR")}</td>`).join("")}</tr>`).join("")}</tbody></table><p><b>최고 성과: ${best[0]} → 등급 ${best[1].grade()}</b></p>`;
+  $("dlg").showModal();
+};
+refresh();
+</script>
+</body>
+</html>
